@@ -45,9 +45,9 @@ on:
         options: [vbr, vbr-flat, crf]
         default: vbr
       output:
-        description: "Where to put the finished files"
+        description: "Where to put the finished files (none = run all checks, upload nothing)"
         type: choice
-        options: [gofile, artifact, release]
+        options: [gofile, artifact, release, none]
         default: gofile
 
 permissions:
