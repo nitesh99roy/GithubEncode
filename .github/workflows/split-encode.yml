@@ -1,0 +1,174 @@
+# Split encode: one video -> N pieces encoded on N runners at once -> joined + full audio.
+# Run it from the Actions tab: "Split Encode (CPU x264)" -> "Run workflow".
+name: Split Encode (CPU x264)
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Download link to the video (direct link or Google Drive)"
+        required: true
+      name:
+        description: "Output name, e.g. Movie.2024.1080p.WEB-DL (empty = use the file's name)"
+        required: false
+        default: ""
+      chunks:
+        description: "Number of pieces encoded at the same time (2-20)"
+        required: true
+        default: "16"
+      formats:
+        description: "Resolutions (comma separated)"
+        required: true
+        default: "480p,720p,1080p"
+      crop:
+        description: "Remove black bars"
+        type: boolean
+        default: true
+      preset:
+        description: "x264 preset (slower = better quality per MB)"
+        type: choice
+        options: [veryfast, faster, fast, medium, slow, slower]
+        default: medium
+      output:
+        description: "Where to put the finished files"
+        type: choice
+        options: [artifact, release]
+        default: artifact
+
+permissions:
+  contents: write   # needed for the temporary draft release that carries pieces between jobs
+
+concurrency:
+  group: split-encode-${{ github.run_id }}
+
+env:
+  SCRATCH_TAG: split-${{ github.run_id }}
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+  X264_PRESET: ${{ inputs.preset }}
+  PYTHONUNBUFFERED: "1"
+  FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+
+jobs:
+  prepare:
+    name: Download + split
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      name: ${{ steps.plan.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: |
+          curl -fsSL "$FFMPEG_URL" | tar -xJ -C /opt
+          echo "/opt/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+
+      - name: Work folder on the large disk
+        run: |
+          if sudo mkdir -p /mnt/work && sudo chown "$(id -u):$(id -g)" /mnt/work; then
+            echo "WORK=/mnt/work" >> "$GITHUB_ENV"
+          else
+            echo "WORK=$GITHUB_WORKSPACE/work" >> "$GITHUB_ENV"
+          fi
+          df -h / /mnt || true
+
+      - name: Download source
+        env:
+          SOURCE_URL: ${{ inputs.url }}
+        run: python3 split_encode.py download "$SOURCE_URL"
+
+      - name: Create temporary draft release
+        run: |
+          gh release create "$SCRATCH_TAG" --draft \
+            --title "split encode scratch ${{ github.run_id }}" \
+            --notes "Temporary storage for a split encode - deleted automatically."
+
+      - name: Plan, cut pieces, encode audio
+        id: plan
+        env:
+          CHUNKS: ${{ inputs.chunks }}
+          FORMATS: ${{ inputs.formats }}
+          CROP: ${{ inputs.crop }}
+          OUT_NAME: ${{ inputs.name }}
+        run: python3 split_encode.py prepare "$CHUNKS" "$FORMATS" "$CROP" "$OUT_NAME"
+
+  encode:
+    name: Encode piece ${{ matrix.chunk }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: true
+      matrix:
+        chunk: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: |
+          curl -fsSL "$FFMPEG_URL" | tar -xJ -C /opt
+          echo "/opt/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+
+      - name: Encode
+        run: python3 split_encode.py encode ${{ matrix.chunk }}
+
+  merge:
+    name: Join + add audio
+    needs: [prepare, encode]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: |
+          curl -fsSL "$FFMPEG_URL" | tar -xJ -C /opt
+          echo "/opt/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+
+      - name: Work folder on the large disk
+        run: |
+          if sudo mkdir -p /mnt/work && sudo chown "$(id -u):$(id -g)" /mnt/work; then
+            echo "WORK=/mnt/work" >> "$GITHUB_ENV"
+          else
+            echo "WORK=$GITHUB_WORKSPACE/work" >> "$GITHUB_ENV"
+          fi
+
+      - name: Join pieces and add audio/subtitles/chapters
+        run: python3 split_encode.py merge
+
+      - name: Upload as artifact
+        if: inputs.output == 'artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.name }}
+          path: ${{ env.WORK }}/out/*.mkv
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload to a draft release
+        if: inputs.output == 'release'
+        env:
+          TITLE: ${{ needs.prepare.outputs.name }}
+        run: python3 split_encode.py publish "encode-${{ github.run_id }}" "$TITLE"
+
+      - name: Upload files over 2 GB as artifact
+        if: inputs.output == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.name }}
+          path: ${{ env.WORK }}/out/big/*.mkv
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: ignore
+
+  cleanup:
+    name: Delete temporary release
+    needs: [prepare, encode, merge]
+    # Kept when something failed, so "Re-run failed jobs" still finds the pieces
+    if: always() && (needs.merge.result == 'success' || needs.prepare.result == 'failure' || cancelled())
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete scratch release
+        run: gh release delete "$SCRATCH_TAG" --yes || true
