@@ -58,12 +58,17 @@ X264_LEVEL = "4.1"         # plays on practically every TV / phone / browser
 X265_PARAMS = {"aq-mode": 3, "log-level": "error"}
 
 # Size control:
-#   "target" = every movie lands near the target_kbps below. split_encode.py encodes a short
-#              sample of the movie first and picks the CRF that hits the target (no 2-pass).
-#   "crf"    = fixed CRF per format (size depends on the movie).
-SIZE_MODE = "crf"         # the GitHub workflow sets "target" by default
-CRF_OVERRIDE = {}         # per-format CRF chosen by the sample test
-TARGET_PEAK = 2.0         # in target mode: peak bitrate = 2 x target, buffer = 2 x peak
+#   "vbr"      = fixed average bitrate per format (target_kbps below = FinalEncoder.py's
+#                bitrates), the encoder varies it scene by scene up to a peak limit.
+#                Size is controlled. On GitHub each piece gets its own share of the
+#                bitrate (harder pieces more), the whole movie still averages target_kbps.
+#   "vbr-flat" = same, but every piece gets exactly target_kbps (like FinalEncoder.py).
+#   "crf"      = fixed quality (CRF per format), size depends on the movie.
+#   "target"   = (older) CRF picked by a sample test to land near target_kbps.
+SIZE_MODE = "vbr"
+CRF_OVERRIDE = {}         # per-format CRF chosen by the sample test ("target" mode)
+PIECE_BITRATE = {}        # per-format kbps for the piece being encoded (set by split_encode.py)
+TARGET_PEAK = 2.0         # peak bitrate = 2 x average, buffer = 2 x peak
 
 # One entry per output (FinalEncoder.py's five formats).
 # box = the frame the video is fitted into (aspect ratio is always kept).
@@ -98,8 +103,12 @@ def vlabel(tag):
 
 
 def rate_args(tag):
-    """CRF + peak limit, for either size mode."""
+    """Rate control for one format: VBR (average bitrate + peak limit) or CRF + peak limit."""
     fmt = FORMATS[tag]
+    if SIZE_MODE in ("vbr", "vbr-flat") and fmt.get("target_kbps"):
+        kbps = int(round(PIECE_BITRATE.get(tag, fmt["target_kbps"])))
+        peak = int(kbps * TARGET_PEAK)
+        return ["-b:v", f"{kbps}k", "-maxrate", f"{peak}k", "-bufsize", f"{peak * 2}k"]
     if SIZE_MODE == "target" and fmt.get("target_kbps"):
         crf = CRF_OVERRIDE.get(tag, fmt["crf"])
         peak = int(fmt["target_kbps"] * TARGET_PEAK)

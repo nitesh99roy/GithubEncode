@@ -40,10 +40,10 @@ on:
         options: [film, animation, grain, none]
         default: film
       size:
-        description: "target = fixed size per hour (FinalEncoder bitrates, auto CRF); crf = fixed quality"
+        description: "vbr = fixed bitrate (FinalEncoder), hard pieces get more; vbr-flat = same for every piece; crf = fixed quality"
         type: choice
-        options: [target, crf]
-        default: target
+        options: [vbr, vbr-flat, crf]
+        default: vbr
       output:
         description: "Where to put the finished files"
         type: choice
