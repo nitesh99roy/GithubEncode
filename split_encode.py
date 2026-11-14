@@ -27,6 +27,7 @@ Commands:
   cleanup                                    delete the temporary draft release
 """
 import fnmatch
+import importlib
 import json
 import math
 import os
@@ -36,7 +37,8 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import CPUEncoder as CE
+# Settings module: CPUEncoder (x264, 3 resolutions) or LowEncoder (x265, small size)
+CE = importlib.import_module(os.environ.get("ENCODER_MODULE", "CPUEncoder"))
 
 WORK = os.environ.get("WORK") or os.path.abspath("work")
 TAG = os.environ.get("SCRATCH_TAG", "")
@@ -49,11 +51,27 @@ MIN_PIECE_SEC = float(os.environ.get("MIN_PIECE_SEC", "30"))
 MAX_PIECES = 20                         # GitHub Free runs at most 20 jobs at once
 MAX_ASSET = 1800 * 1024 * 1024          # release assets must stay under 2 GB
 
-CE.X264_PRESET = os.environ.get("X264_PRESET") or CE.X264_PRESET
-if "X264_TUNE" in os.environ:
-    CE.X264_TUNE = "" if os.environ["X264_TUNE"] in ("", "none") else os.environ["X264_TUNE"]
-if "X264_ADVANCED" in os.environ:
-    CE.X264_ADVANCED = os.environ["X264_ADVANCED"].lower() == "true"
+if hasattr(CE, "apply_env"):
+    CE.apply_env()
+if hasattr(CE, "X264_PRESET"):
+    CE.X264_PRESET = os.environ.get("X264_PRESET") or CE.X264_PRESET
+    if "X264_TUNE" in os.environ:
+        CE.X264_TUNE = "" if os.environ["X264_TUNE"] in ("", "none") else os.environ["X264_TUNE"]
+    if "X264_ADVANCED" in os.environ:
+        CE.X264_ADVANCED = os.environ["X264_ADVANCED"].lower() == "true"
+
+
+def describe_settings():
+    if hasattr(CE, "describe"):
+        return CE.describe()
+    return (f"preset: {CE.X264_PRESET} | tune: {CE.X264_TUNE or 'none'} | "
+            f"advanced: {'on' if CE.X264_ADVANCED else 'off'}")
+
+
+def output_name(base, tag):
+    if hasattr(CE, "output_name"):
+        return CE.output_name(base, tag)
+    return CE.generate_output_filename(base, tag) + ".mkv"
 
 
 # -------------------------------------------------------------------------------
@@ -302,15 +320,14 @@ def cmd_prepare(chunks_req, formats, crop_flag, name=""):
         "vindex": info["vindex"], "sar": info["sar"], "crop": crop, "tags": tags,
         "pieces": pieces, "info": info,
         "has_extras": bool(info["audio"] or info["subs"] or info["has_attachments"]),
-        "outputs": {t: CE.generate_output_filename(base, t) + ".mkv" for t in tags},
+        "outputs": {t: output_name(base, t) for t in tags},
     }
     os.makedirs(WORK, exist_ok=True)
     plan_path = os.path.join(WORK, "plan.json")
     with open(plan_path, "w", encoding="utf-8") as f:
         json.dump(plan, f, indent=2)
     print(f"🧩 {n} pieces of ~{CE.format_time(step)} | formats: {' + '.join(tags)} | "
-          f"crop: {crop['ffmpeg_crop'] if crop else 'none'} | preset: {CE.X264_PRESET} | "
-          f"tune: {CE.X264_TUNE or 'none'} | advanced: {'on' if CE.X264_ADVANCED else 'off'}")
+          f"crop: {crop['ffmpeg_crop'] if crop else 'none'} | {describe_settings()}")
     for t, o in plan["outputs"].items():
         print(f"   {t} -> {o}")
     store_upload(plan_path)
@@ -351,7 +368,12 @@ def cmd_encode(index):
     if abs(plan["sar"] - 1.0) > 0.01:
         chain.append("scale='trunc(iw*sar/2)*2':ih")
 
+    eff_w = (plan["crop"]["w"] if plan["crop"] else plan["info"]["width"]) * plan["sar"]
+    eff_h = plan["crop"]["h"] if plan["crop"] else plan["info"]["height"]
+
     def scale(t):
+        if hasattr(CE, "scale_filter"):
+            return CE.scale_filter(t, eff_w, eff_h) + f"[v_{t}]"
         bw, bh = CE.FORMATS[t]["box"]
         return (f"scale={bw}:{bh}:force_original_aspect_ratio=decrease:force_divisible_by=2"
                 f":flags=lanczos,setsar=1,format=yuv420p[v_{t}]")
@@ -370,7 +392,8 @@ def cmd_encode(index):
         fmt = CE.FORMATS[t]
         out = os.path.join(d, f"piece_{t}_{k:03d}.mkv")
         outs.append(out)
-        args += ["-map", f"[v_{t}]"] + CE.x264_args(t) + ["-fps_mode", "passthrough", out]
+        vargs = CE.video_args(t) if hasattr(CE, "video_args") else CE.x264_args(t)
+        args += ["-map", f"[v_{t}]"] + vargs + ["-fps_mode", "passthrough", out]
 
     start = time.time()
     ffmpeg(args, f"piece {k}")

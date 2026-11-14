@@ -18,3 +18,6 @@ conversiontime.txt
 error_log_*.txt
 __pycache__/
 *.pyc
+
+# Separate repo (LOWENCODE) lives in this folder
+LOWENCODE/
