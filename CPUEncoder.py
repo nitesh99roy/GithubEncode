@@ -12,8 +12,10 @@ CPUEncoder.py - CPU (libx264) encoder for 480p / 720p / 1080p. No watermark.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import Counter
@@ -145,7 +147,7 @@ def probe(path):
     """One ffprobe call: main video stream, duration, audio channels, subtitles, attachments."""
     cmd = ["ffprobe", "-v", "error", "-show_entries",
            "format=duration:stream=index,codec_type,codec_name,width,height,channels,"
-           "sample_aspect_ratio:stream_disposition=attached_pic",
+           "sample_aspect_ratio:stream_disposition=attached_pic:stream_tags=filename,mimetype",
            "-of", "json", path]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
@@ -178,7 +180,43 @@ def probe(path):
         "subs": [{"index": s["index"], "codec": s.get("codec_name", "")}
                  for s in streams if s.get("codec_type") == "subtitle"],
         "has_attachments": any(s.get("codec_type") == "attachment" for s in streams),
+        "n_attachments": sum(1 for s in streams if s.get("codec_type") == "attachment"),
+        # Cover image(s): MKV image attachments, which ffmpeg shows as picture streams
+        "pics": [cover_info(s) for s in streams if s.get("codec_type") == "video"
+                 and s.get("disposition", {}).get("attached_pic")],
     }
+
+
+def cover_info(s):
+    tags = {k.lower(): v for k, v in (s.get("tags") or {}).items()}
+    ext = {"mjpeg": "jpg", "bmp": "bmp", "webp": "webp", "gif": "gif"}.get(s.get("codec_name"), "png")
+    return {"index": s["index"], "ext": ext,
+            "filename": tags.get("filename") or f"cover.{ext}",
+            "mimetype": tags.get("mimetype") or ("image/jpeg" if ext == "jpg" else f"image/{ext}")}
+
+
+def dump_covers(source, info, folder):
+    """Save the source's cover image(s) to files so they can be attached to the output.
+    (Copying the picture stream instead would turn it into a second video track.)"""
+    covers = []
+    for i, p in enumerate(info.get("pics", [])):
+        path = os.path.join(folder, f"cover_{i}.{p['ext']}")
+        r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", source,
+                            "-map", f"0:{p['index']}", "-c", "copy", "-frames:v", "1",
+                            "-f", "image2", path])
+        if r.returncode == 0 and os.path.exists(path):
+            covers.append({"path": path, "filename": p["filename"], "mimetype": p["mimetype"]})
+    return covers
+
+
+def cover_attach_args(covers, first_attachment):
+    """-attach args; first_attachment = attachment streams already in the output (fonts)."""
+    args = []
+    for i, c in enumerate(covers):
+        k = first_attachment + i
+        args += ["-attach", c["path"], f"-metadata:s:t:{k}", f"mimetype={c['mimetype']}",
+                 f"-metadata:s:t:{k}", f"filename={c['filename']}"]
+    return args
 
 
 # -------------------------------------------------------------------------------
@@ -274,7 +312,7 @@ def build_filter(info, crop, targets):
     return ";".join(chains)
 
 
-def build_output_args(info, tag, out_path):
+def build_output_args(info, tag, out_path, covers=()):
     fmt = FORMATS[tag]
     args = ["-map", f"[v_{tag}]", "-map", "0:a?"]
     for s in info["subs"]:
@@ -300,6 +338,7 @@ def build_output_args(info, tag, out_path):
         args += ["-disposition:s:0", "default"]
     if info["has_attachments"]:
         args += ["-c:t", "copy"]
+    args += cover_attach_args(covers, info.get("n_attachments", 0))
 
     args += ["-max_muxing_queue_size", "4096", out_path]
     return args
@@ -415,10 +454,12 @@ def encode_file(video, input_dir, output_dir, tags, enable_crop, crop_cache=None
             return True
 
     tags_todo = [t["tag"] for t in todo]
+    cover_dir = tempfile.mkdtemp(prefix="covers_")
+    covers = dump_covers(source, info, cover_dir)
     cmd = ["ffmpeg", "-nostdin", "-y", "-hide_banner", "-i", source,
            "-filter_complex", build_filter(info, crop, tags_todo)]
     for t in todo:
-        cmd += build_output_args(info, t["tag"], t["part"])
+        cmd += build_output_args(info, t["tag"], t["part"], covers)
 
     print(f"🚀 Encoding {' + '.join(tags_todo)} on CPU (libx264, preset {X264_PRESET})")
     print(" ".join(f'"{c}"' if " " in c else c for c in cmd))
@@ -431,9 +472,13 @@ def encode_file(video, input_dir, output_dir, tags, enable_crop, crop_cache=None
                 except OSError:
                     pass
 
+    def remove_covers():
+        shutil.rmtree(cover_dir, ignore_errors=True)
+
     try:
         cleanup()
         rc, lines = run_ffmpeg(cmd)
+        remove_covers()
         if rc != 0:
             log_path = os.path.join(output_dir, f"error_log_{re.sub(r'[^A-Za-z0-9]', '_', base)}.txt")
             with open(log_path, "w", encoding="utf-8") as ef:
@@ -459,9 +504,11 @@ def encode_file(video, input_dir, output_dir, tags, enable_crop, crop_cache=None
 
     except KeyboardInterrupt:
         cleanup()
+        remove_covers()
         raise
     except Exception as e:
         cleanup()
+        remove_covers()
         elapsed = time.time() - start
         print(f"❌ Failed '{video}' after {format_time(elapsed)}: {e}")
         log_line(output_dir, f"{video} - CPU x264: FAILED after {format_time(elapsed)} - {e}")
