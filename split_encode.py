@@ -50,6 +50,10 @@ MAX_PIECES = 20                         # GitHub Free runs at most 20 jobs at on
 MAX_ASSET = 1800 * 1024 * 1024          # release assets must stay under 2 GB
 
 CE.X264_PRESET = os.environ.get("X264_PRESET") or CE.X264_PRESET
+if "X264_TUNE" in os.environ:
+    CE.X264_TUNE = "" if os.environ["X264_TUNE"] in ("", "none") else os.environ["X264_TUNE"]
+if "X264_ADVANCED" in os.environ:
+    CE.X264_ADVANCED = os.environ["X264_ADVANCED"].lower() == "true"
 
 
 # -------------------------------------------------------------------------------
@@ -305,7 +309,8 @@ def cmd_prepare(chunks_req, formats, crop_flag, name=""):
     with open(plan_path, "w", encoding="utf-8") as f:
         json.dump(plan, f, indent=2)
     print(f"🧩 {n} pieces of ~{CE.format_time(step)} | formats: {' + '.join(tags)} | "
-          f"crop: {crop['ffmpeg_crop'] if crop else 'none'} | preset: {CE.X264_PRESET}")
+          f"crop: {crop['ffmpeg_crop'] if crop else 'none'} | preset: {CE.X264_PRESET} | "
+          f"tune: {CE.X264_TUNE or 'none'} | advanced: {'on' if CE.X264_ADVANCED else 'off'}")
     for t, o in plan["outputs"].items():
         print(f"   {t} -> {o}")
     store_upload(plan_path)
@@ -365,13 +370,7 @@ def cmd_encode(index):
         fmt = CE.FORMATS[t]
         out = os.path.join(d, f"piece_{t}_{k:03d}.mkv")
         outs.append(out)
-        args += ["-map", f"[v_{t}]", "-c:v", "libx264", "-preset", CE.X264_PRESET,
-                 "-profile:v", "high", "-crf", str(fmt["crf"]),
-                 "-maxrate", fmt["maxrate"], "-bufsize", fmt["bufsize"],
-                 "-fps_mode", "passthrough"]
-        if CE.X264_TUNE:
-            args += ["-tune", CE.X264_TUNE]
-        args += [out]
+        args += ["-map", f"[v_{t}]"] + CE.x264_args(t) + ["-fps_mode", "passthrough", out]
 
     start = time.time()
     ffmpeg(args, f"piece {k}")

@@ -26,20 +26,55 @@ OUTPUT_FOLDER = "Encode_Output"
 
 # libx264 speed/quality trade-off: ultrafast, superfast, veryfast, faster, fast,
 # medium, slow, slower, veryslow. Slower = better quality per MB, but much slower.
-X264_PRESET = "medium"
-X264_TUNE = ""            # "" (none), "film", "animation", "grain"
+X264_PRESET = "slow"
+# Content type: "film" (live action), "animation" (cartoons/anime), "grain" (grainy
+# film), "" (none). Sets deblock / psy-rd / AQ strength to suit the content.
+X264_TUNE = "film"
+
+# Advanced settings for the best quality per MB (applied on top of the preset).
+# Roughly "veryslow" quality: ~2x slower than plain "slow", ~5-10% smaller files.
+X264_ADVANCED = True
+X264_ADVANCED_PARAMS = {
+    "bframes": 8,          # up to 8 B-frames in a row (B-frames are the cheapest frames)
+    "b-adapt": 2,          # best method for deciding where B-frames go
+    "direct": "auto",      # picks the best B-frame motion prediction per frame
+    "me": "umh",           # wider motion search: finds movement more accurately
+    "merange": 24,         # how far (pixels) motion search looks
+    "subme": 10,           # most precise sub-pixel motion + mode decisions
+    "trellis": 2,          # rate-distortion optimised quantisation on every block
+    "rc-lookahead": 60,    # look 60 frames ahead when spending bits (mbtree)
+    "aq-mode": 3,          # adaptive quantisation with dark-scene bias (less banding in dark areas)
+    "fast-pskip": 0,       # don't skip blocks early - keeps detail in flat/slow areas
+}
+X264_LEVEL = "4.1"         # plays on practically every TV / phone / browser
 
 # Quality: CRF (lower = better/bigger) with a max bitrate cap to keep file sizes in check.
 # box = the frame the video is fitted into (aspect ratio is always kept).
+# ref = reference frames (more = better compression; 1080p kept at 4 for level 4.1).
 # audio_channels: downmix to this many channels if the source has more (None = keep).
 FORMATS = {
-    "480p": {"box": (720, 480), "crf": 23, "maxrate": "700k", "bufsize": "1400k",
+    "480p": {"box": (720, 480), "crf": 23, "maxrate": "700k", "bufsize": "1400k", "ref": 8,
              "audio_bitrate": "96k", "audio_channels": 2},
-    "720p": {"box": (1280, 720), "crf": 22, "maxrate": "1500k", "bufsize": "3000k",
+    "720p": {"box": (1280, 720), "crf": 22, "maxrate": "1500k", "bufsize": "3000k", "ref": 6,
              "audio_bitrate": "128k", "audio_channels": 2},
-    "1080p": {"box": (1920, 1080), "crf": 21, "maxrate": "3000k", "bufsize": "6000k",
+    "1080p": {"box": (1920, 1080), "crf": 21, "maxrate": "3000k", "bufsize": "6000k", "ref": 4,
               "audio_bitrate": "256k", "audio_channels": None},
 }
+
+
+def x264_args(tag):
+    """libx264 video arguments for one resolution (shared with split_encode.py)."""
+    fmt = FORMATS[tag]
+    args = ["-c:v", "libx264", "-preset", X264_PRESET, "-profile:v", "high",
+            "-level:v", X264_LEVEL, "-crf", str(fmt["crf"]),
+            "-maxrate", fmt["maxrate"], "-bufsize", fmt["bufsize"]]
+    if X264_TUNE:
+        args += ["-tune", X264_TUNE]
+    params = {"ref": fmt["ref"]}
+    if X264_ADVANCED:
+        params.update(X264_ADVANCED_PARAMS)
+    args += ["-x264-params", ":".join(f"{k}={v}" for k, v in params.items())]
+    return args
 
 # Skip a resolution when the (cropped) source is smaller than this fraction of its box
 # in BOTH directions - i.e. it would only be an upscale (e.g. 1080p from a 720p source).
@@ -249,10 +284,7 @@ def build_output_args(info, tag, out_path):
     args += ["-map_metadata", "0", "-map_chapters", "0"]
 
     # Video
-    args += ["-c:v", "libx264", "-preset", X264_PRESET, "-profile:v", "high",
-             "-crf", str(fmt["crf"]), "-maxrate", fmt["maxrate"], "-bufsize", fmt["bufsize"]]
-    if X264_TUNE:
-        args += ["-tune", X264_TUNE]
+    args += x264_args(tag)
 
     # Audio - every track to AAC, downmixed only if it has more channels than wanted
     args += ["-c:a", "aac", "-b:a", fmt["audio_bitrate"]]
