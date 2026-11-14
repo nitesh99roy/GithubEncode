@@ -30,10 +30,10 @@ on:
         type: boolean
         default: true
       preset:
-        description: "x264 preset (slower = better quality per MB)"
+        description: "Preset: per-format = 480p/720p slow, 1080p medium, 10BIT medium. Others apply to all 5"
         type: choice
-        options: [veryfast, faster, fast, medium, slow, slower]
-        default: slow
+        options: [per-format, veryfast, faster, fast, medium, slow, slower]
+        default: per-format
       tune:
         description: "Content type"
         type: choice

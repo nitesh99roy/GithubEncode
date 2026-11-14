@@ -29,9 +29,10 @@ from collections import Counter
 INPUT_FOLDER = "Encode_Input"
 OUTPUT_FOLDER = "Encode_Output"
 
-# libx264 speed/quality trade-off: ultrafast, superfast, veryfast, faster, fast,
-# medium, slow, slower, veryslow. Slower = better quality per MB, but much slower.
-X264_PRESET = "slow"
+# Presets (speed/quality trade-off) are set PER FORMAT in FORMATS below:
+# ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow.
+# PRESET_OVERRIDE = one preset for all formats (e.g. "fast" for a quick run); "" = per format.
+PRESET_OVERRIDE = ""
 # Content type: "film" (live action), "animation" (cartoons/anime), "grain" (grainy
 # film), "" (none). Sets deblock / psy-rd / AQ strength to suit the content.
 X264_TUNE = "film"
@@ -53,9 +54,7 @@ X264_ADVANCED_PARAMS = {
 }
 X264_LEVEL = "4.1"         # plays on practically every TV / phone / browser
 
-# 10-bit HEVC outputs (720p.10BIT / 1080p.10BIT) use x265. x265 is much slower than
-# x264, so it runs at "fast" by default (still more efficient than x264 at the same size).
-X265_PRESET = "fast"
+# 10-bit HEVC outputs (720p.10BIT / 1080p.10BIT) use x265 (slower than x264 per preset name).
 X265_PARAMS = {"aq-mode": 3, "log-level": "error"}
 
 # Size control:
@@ -74,19 +73,19 @@ TARGET_PEAK = 2.0         # in target mode: peak bitrate = 2 x target, buffer = 
 # audio: bitrate per track (FinalEncoder.py's values); audio_channels = downmix to this many
 # channels if the source has more (None = keep 5.1).
 FORMATS = {
-    "480p": {"codec": "x264", "box": (720, 480), "target_kbps": 450,
+    "480p": {"codec": "x264", "preset": "slow", "box": (720, 480), "target_kbps": 450,
              "crf": 23, "maxrate": "700k", "bufsize": "1400k", "ref": 8,
              "audio_bitrate": "60k", "audio_channels": 1},
-    "720p": {"codec": "x264", "box": (1280, 720), "target_kbps": 1200,
+    "720p": {"codec": "x264", "preset": "slow", "box": (1280, 720), "target_kbps": 1200,
              "crf": 22, "maxrate": "1500k", "bufsize": "3000k", "ref": 6,
              "audio_bitrate": "112k", "audio_channels": 2},
-    "1080p": {"codec": "x264", "box": (1920, 1080), "target_kbps": 2500,
+    "1080p": {"codec": "x264", "preset": "medium", "box": (1920, 1080), "target_kbps": 2500,
               "crf": 21, "maxrate": "3000k", "bufsize": "6000k", "ref": 4,
               "audio_bitrate": "256k", "audio_channels": None},
-    "720p.10BIT": {"codec": "x265", "box": (1280, 720), "target_kbps": 800,
+    "720p.10BIT": {"codec": "x265", "preset": "medium", "box": (1280, 720), "target_kbps": 800,
                    "crf": 24, "maxrate": "1100k", "bufsize": "2400k",
                    "audio_bitrate": "96k", "audio_channels": 2},
-    "1080p.10BIT": {"codec": "x265", "box": (1920, 1080), "target_kbps": 1600,
+    "1080p.10BIT": {"codec": "x265", "preset": "medium", "box": (1920, 1080), "target_kbps": 1600,
                     "crf": 23, "maxrate": "2000k", "bufsize": "4000k",
                     "audio_bitrate": "160k", "audio_channels": None},
 }
@@ -108,13 +107,22 @@ def rate_args(tag):
     return ["-crf", str(fmt["crf"]), "-maxrate", fmt["maxrate"], "-bufsize", fmt["bufsize"]]
 
 
+def preset_for(tag):
+    return PRESET_OVERRIDE or FORMATS[tag]["preset"]
+
+
+def presets_text(tags=None):
+    """e.g. '480p slow, 720p slow, 1080p medium, ...' for log lines."""
+    return ", ".join(f"{t} {preset_for(t)}" for t in (tags or FORMATS))
+
+
 def video_args(tag):
     """Video encoder arguments for one format (shared with split_encode.py)."""
     return x265_args(tag) if FORMATS[tag]["codec"] == "x265" else x264_args(tag)
 
 
 def x265_args(tag):
-    args = ["-c:v", "libx265", "-preset", X265_PRESET, "-profile:v", "main10"] + rate_args(tag)
+    args = ["-c:v", "libx265", "-preset", preset_for(tag), "-profile:v", "main10"] + rate_args(tag)
     args += ["-x265-params", ":".join(f"{k}={v}" for k, v in X265_PARAMS.items())]
     return args
 
@@ -130,7 +138,7 @@ def scale_filter(tag, src_w=None, src_h=None):
 def x264_args(tag):
     """libx264 video arguments for one resolution."""
     fmt = FORMATS[tag]
-    args = ["-c:v", "libx264", "-preset", X264_PRESET, "-profile:v", "high",
+    args = ["-c:v", "libx264", "-preset", preset_for(tag), "-profile:v", "high",
             "-level:v", X264_LEVEL] + rate_args(tag)
     if X264_TUNE:
         args += ["-tune", X264_TUNE]
@@ -524,7 +532,7 @@ def encode_file(video, input_dir, output_dir, tags, enable_crop, crop_cache=None
     for t in todo:
         cmd += build_output_args(info, t["tag"], t["part"], covers)
 
-    print(f"🚀 Encoding {' + '.join(tags_todo)} on CPU (libx264, preset {X264_PRESET})")
+    print(f"🚀 Encoding on CPU: {presets_text(tags_todo)}")
     print(" ".join(f'"{c}"' if " " in c else c for c in cmd))
 
     def cleanup():
@@ -640,7 +648,7 @@ def main():
     tags = options[option]
     crop_cache = {} if option in (5, 9) else None
     print(f"\n✅ Formats: {' + '.join(tags)} | crop: {'on' if enable_crop else 'off'} | "
-          f"preset: {X264_PRESET}")
+          f"presets: {presets_text(tags)}")
 
     overall = time.time()
     ok = failed = 0
