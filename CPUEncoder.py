@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-CPUEncoder.py - CPU (libx264) encoder for 480p / 720p / 1080p. No watermark.
+CPUEncoder.py - CPU encoder, no watermark. Five formats like FinalEncoder.py:
+480p / 720p / 1080p H.264 (libx264) + 720p.10BIT / 1080p.10BIT HEVC (libx265).
 
  - Put videos in Encode_Input/ (next to this script). Outputs go to Encode_Output/.
+ - Bitrates/audio follow FinalEncoder.py. On GitHub (split_encode.py) the default is
+   "target" size mode: a short sample test picks the CRF that lands on those bitrates.
  - One decode per file, split into every selected resolution in a single ffmpeg run.
  - Smart black-bar crop detection (9 sample points, consensus vote).
  - Writes to .part files first and renames only after a successful encode, so a
@@ -50,26 +53,85 @@ X264_ADVANCED_PARAMS = {
 }
 X264_LEVEL = "4.1"         # plays on practically every TV / phone / browser
 
-# Quality: CRF (lower = better/bigger) with a max bitrate cap to keep file sizes in check.
+# 10-bit HEVC outputs (720p.10BIT / 1080p.10BIT) use x265. x265 is much slower than
+# x264, so it runs at "fast" by default (still more efficient than x264 at the same size).
+X265_PRESET = "fast"
+X265_PARAMS = {"aq-mode": 3, "log-level": "error"}
+
+# Size control:
+#   "target" = every movie lands near the target_kbps below. split_encode.py encodes a short
+#              sample of the movie first and picks the CRF that hits the target (no 2-pass).
+#   "crf"    = fixed CRF per format (size depends on the movie).
+SIZE_MODE = "crf"         # the GitHub workflow sets "target" by default
+CRF_OVERRIDE = {}         # per-format CRF chosen by the sample test
+TARGET_PEAK = 2.0         # in target mode: peak bitrate = 2 x target, buffer = 2 x peak
+
+# One entry per output (FinalEncoder.py's five formats).
 # box = the frame the video is fitted into (aspect ratio is always kept).
-# ref = reference frames (more = better compression; 1080p kept at 4 for level 4.1).
-# audio_channels: downmix to this many channels if the source has more (None = keep).
+# target_kbps = average VIDEO bitrate in target mode (FinalEncoder.py's bitrates).
+# crf / maxrate / bufsize = used in crf mode (crf is also the sample test's starting point).
+# ref = reference frames (x264; 1080p kept at 4 for level 4.1).
+# audio: bitrate per track (FinalEncoder.py's values); audio_channels = downmix to this many
+# channels if the source has more (None = keep 5.1).
 FORMATS = {
-    "480p": {"box": (720, 480), "crf": 23, "maxrate": "700k", "bufsize": "1400k", "ref": 8,
-             "audio_bitrate": "96k", "audio_channels": 2},
-    "720p": {"box": (1280, 720), "crf": 22, "maxrate": "1500k", "bufsize": "3000k", "ref": 6,
-             "audio_bitrate": "128k", "audio_channels": 2},
-    "1080p": {"box": (1920, 1080), "crf": 21, "maxrate": "3000k", "bufsize": "6000k", "ref": 4,
+    "480p": {"codec": "x264", "box": (720, 480), "target_kbps": 450,
+             "crf": 23, "maxrate": "700k", "bufsize": "1400k", "ref": 8,
+             "audio_bitrate": "60k", "audio_channels": 1},
+    "720p": {"codec": "x264", "box": (1280, 720), "target_kbps": 1200,
+             "crf": 22, "maxrate": "1500k", "bufsize": "3000k", "ref": 6,
+             "audio_bitrate": "112k", "audio_channels": 2},
+    "1080p": {"codec": "x264", "box": (1920, 1080), "target_kbps": 2500,
+              "crf": 21, "maxrate": "3000k", "bufsize": "6000k", "ref": 4,
               "audio_bitrate": "256k", "audio_channels": None},
+    "720p.10BIT": {"codec": "x265", "box": (1280, 720), "target_kbps": 800,
+                   "crf": 24, "maxrate": "1100k", "bufsize": "2400k",
+                   "audio_bitrate": "96k", "audio_channels": 2},
+    "1080p.10BIT": {"codec": "x265", "box": (1920, 1080), "target_kbps": 1600,
+                    "crf": 23, "maxrate": "2000k", "bufsize": "4000k",
+                    "audio_bitrate": "160k", "audio_channels": None},
 }
+ALL_FORMATS = list(FORMATS)
+
+
+def vlabel(tag):
+    """Filter-graph label for a format (labels can't contain dots)."""
+    return "v_" + re.sub(r"\W", "_", tag)
+
+
+def rate_args(tag):
+    """CRF + peak limit, for either size mode."""
+    fmt = FORMATS[tag]
+    if SIZE_MODE == "target" and fmt.get("target_kbps"):
+        crf = CRF_OVERRIDE.get(tag, fmt["crf"])
+        peak = int(fmt["target_kbps"] * TARGET_PEAK)
+        return ["-crf", str(crf), "-maxrate", f"{peak}k", "-bufsize", f"{peak * 2}k"]
+    return ["-crf", str(fmt["crf"]), "-maxrate", fmt["maxrate"], "-bufsize", fmt["bufsize"]]
+
+
+def video_args(tag):
+    """Video encoder arguments for one format (shared with split_encode.py)."""
+    return x265_args(tag) if FORMATS[tag]["codec"] == "x265" else x264_args(tag)
+
+
+def x265_args(tag):
+    args = ["-c:v", "libx265", "-preset", X265_PRESET, "-profile:v", "main10"] + rate_args(tag)
+    args += ["-x265-params", ":".join(f"{k}={v}" for k, v in X265_PARAMS.items())]
+    return args
+
+
+def scale_filter(tag, src_w=None, src_h=None):
+    """Fit into the format's box (aspect kept, never stretched) + pixel format."""
+    bw, bh = FORMATS[tag]["box"]
+    pix = "yuv420p10le" if FORMATS[tag]["codec"] == "x265" else "yuv420p"
+    return (f"scale={bw}:{bh}:force_original_aspect_ratio=decrease:force_divisible_by=2"
+            f":flags=lanczos,setsar=1,format={pix}")
 
 
 def x264_args(tag):
-    """libx264 video arguments for one resolution (shared with split_encode.py)."""
+    """libx264 video arguments for one resolution."""
     fmt = FORMATS[tag]
     args = ["-c:v", "libx264", "-preset", X264_PRESET, "-profile:v", "high",
-            "-level:v", X264_LEVEL, "-crf", str(fmt["crf"]),
-            "-maxrate", fmt["maxrate"], "-bufsize", fmt["bufsize"]]
+            "-level:v", X264_LEVEL] + rate_args(tag)
     if X264_TUNE:
         args += ["-tune", X264_TUNE]
     params = {"ref": fmt["ref"]}
@@ -303,9 +365,7 @@ def build_filter(info, crop, targets):
     head = f"[0:{info['vindex']}]" + ",".join(pre)
 
     def out_chain(t):
-        bw, bh = FORMATS[t]["box"]
-        return (f"scale={bw}:{bh}:force_original_aspect_ratio=decrease:force_divisible_by=2"
-                f":flags=lanczos,setsar=1,format=yuv420p[v_{t}]")
+        return f"{scale_filter(t)}[{vlabel(t)}]"
 
     if len(targets) == 1:
         return head + ("," if pre else "") + out_chain(targets[0])
@@ -317,7 +377,7 @@ def build_filter(info, crop, targets):
 
 def build_output_args(info, tag, out_path, covers=()):
     fmt = FORMATS[tag]
-    args = ["-map", f"[v_{tag}]", "-map", "0:a?"]
+    args = ["-map", f"[{vlabel(tag)}]", "-map", "0:a?"]
     for s in info["subs"]:
         args += ["-map", f"0:{s['index']}"]
     if info["has_attachments"]:
@@ -325,7 +385,7 @@ def build_output_args(info, tag, out_path, covers=()):
     args += ["-map_metadata", "0", "-map_chapters", "0"]
 
     # Video
-    args += x264_args(tag)
+    args += video_args(tag)
 
     # Audio - every track to AAC, downmixed only if it has more channels than wanted
     args += ["-c:a", "aac", "-b:a", fmt["audio_bitrate"]]
@@ -562,10 +622,15 @@ def main():
     print("3) 1080p only")
     print("4) 480p + 720p + 1080p  (one decode, all three at once)  [default]")
     print("5) TV SERIES - 480p + 720p + 1080p, black bars detected once and reused for every episode")
-    options = {1: ["480p"], 2: ["720p"], 3: ["1080p"],
-               4: ["480p", "720p", "1080p"], 5: ["480p", "720p", "1080p"]}
+    print("6) 720p 10BIT (HEVC) only")
+    print("7) 1080p 10BIT (HEVC) only")
+    print("8) All 5: 480p + 720p + 1080p + 720p 10BIT + 1080p 10BIT")
+    print("9) TV SERIES - all 5, black bars detected once and reused for every episode")
+    three = ["480p", "720p", "1080p"]
+    options = {1: ["480p"], 2: ["720p"], 3: ["1080p"], 4: three, 5: three,
+               6: ["720p.10BIT"], 7: ["1080p.10BIT"], 8: ALL_FORMATS, 9: ALL_FORMATS}
     try:
-        option = int(input("Enter option (1-5): ").strip())
+        option = int(input("Enter option (1-9): ").strip())
         if option not in options:
             raise ValueError
     except (ValueError, EOFError):
@@ -573,7 +638,7 @@ def main():
         option = 4
 
     tags = options[option]
-    crop_cache = {} if option == 5 else None
+    crop_cache = {} if option in (5, 9) else None
     print(f"\n✅ Formats: {' + '.join(tags)} | crop: {'on' if enable_crop else 'off'} | "
           f"preset: {X264_PRESET}")
 
