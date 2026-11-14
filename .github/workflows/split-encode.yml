@@ -20,6 +20,10 @@ on:
         description: "Resolutions (comma separated)"
         required: true
         default: "480p,720p,1080p"
+      audio:
+        description: "Audio languages to keep: all, or e.g. eng / hin,eng"
+        required: true
+        default: "all"
       crop:
         description: "Remove black bars"
         type: boolean
@@ -57,6 +61,7 @@ env:
   X264_PRESET: ${{ inputs.preset }}
   X264_TUNE: ${{ inputs.tune }}
   X264_ADVANCED: ${{ inputs.advanced }}
+  AUDIO_LANGS: ${{ inputs.audio }}
   PYTHONUNBUFFERED: "1"
   FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
 
