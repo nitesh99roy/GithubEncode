@@ -23,6 +23,7 @@ Commands:
   encode   <index>                           encode one piece into every resolution
   merge                                      join pieces + audio/subs/chapters -> $WORK/out/
   publish                                    put the results in a draft release
+  gofile                                     upload the results to one Gofile folder
   cleanup                                    delete the temporary draft release
 """
 import fnmatch
@@ -462,6 +463,65 @@ def cmd_publish(release_tag, title):
              "--notes", "Split encode output (CPU x264)."] + small)
 
 
+GOFILE_UPLOAD = "https://upload.gofile.io/uploadfile"
+
+
+def gofile_upload(path, token="", folder=""):
+    """Upload one file to Gofile with curl (streams from disk). Returns the 'data' dict."""
+    cmd = ["curl", "-sS", "--fail-with-body", "--retry", "3", "--retry-all-errors",
+           "-F", f'file=@"{path}"']
+    if folder:
+        cmd += ["-F", f"folderId={folder}"]
+    if token:
+        cmd += ["-H", f"Authorization: Bearer {token}"]
+    cmd.append(GOFILE_UPLOAD)
+    print(f"⬆️  Uploading {os.path.basename(path)} ({mb(path)}) to Gofile ...", flush=True)
+    start = time.time()
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        reply = json.loads(r.stdout)
+    except ValueError:
+        reply = {}
+    if r.returncode != 0 or reply.get("status") != "ok":
+        die(f"Gofile upload failed for {os.path.basename(path)}: {r.stdout[:300]} {r.stderr[:300]}")
+    secs = time.time() - start
+    speed = os.path.getsize(path) / (1024 * 1024) / max(secs, 0.1)
+    print(f"✅ {os.path.basename(path)} uploaded in {CE.format_time(secs)} ({speed:.0f} MB/s)", flush=True)
+    return reply["data"]
+
+
+def cmd_gofile():
+    """Upload every finished file into one Gofile folder and print the link."""
+    out_dir = os.path.join(WORK, "out")
+    files = sorted(os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.endswith(".mkv"))
+    if not files:
+        die("no finished files to upload")
+    account = os.environ.get("GOFILE_TOKEN", "").strip()
+
+    # First file creates the folder; the rest go into it at the same time
+    first = gofile_upload(files[0], token=account)
+    folder = first["parentFolder"]
+    token = account or first.get("guestToken", "")
+    with ThreadPoolExecutor(3) as pool:
+        list(pool.map(lambda f: gofile_upload(f, token=token, folder=folder), files[1:]))
+
+    link = first["downloadPage"]
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if account:
+        # Repo logs are public: keep the link out of them, it's in the Gofile account
+        print("🔗 Uploaded to your Gofile account (link not printed because logs are public).")
+        if summary:
+            with open(summary, "a", encoding="utf-8") as f:
+                f.write("### ✅ Uploaded to your Gofile account\n")
+        return
+    print(f"🔗 Gofile link: {link}")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write(f"### ✅ Gofile download\n\n{link}\n\n")
+            for p in files:
+                f.write(f"- {os.path.basename(p)} ({mb(p)})\n")
+
+
 def cmd_cleanup():
     run(["gh", "release", "delete", TAG, "--yes"], check=False)
 
@@ -471,7 +531,8 @@ def main():
         die(__doc__)
     cmd, args = sys.argv[1], sys.argv[2:]
     commands = {"download": cmd_download, "prepare": cmd_prepare, "encode": cmd_encode,
-                "merge": cmd_merge, "publish": cmd_publish, "cleanup": cmd_cleanup}
+                "merge": cmd_merge, "publish": cmd_publish, "gofile": cmd_gofile,
+                "cleanup": cmd_cleanup}
     if cmd not in commands:
         die(f"unknown command {cmd}")
     commands[cmd](*args)

@@ -32,8 +32,8 @@ on:
       output:
         description: "Where to put the finished files"
         type: choice
-        options: [artifact, release]
-        default: artifact
+        options: [gofile, artifact, release]
+        default: gofile
 
 permissions:
   contents: write   # needed for the temporary draft release that carries pieces between jobs
@@ -138,8 +138,17 @@ jobs:
       - name: Join pieces and add audio/subtitles/chapters
         run: python3 split_encode.py merge
 
+      - name: Upload to Gofile
+        if: inputs.output == 'gofile'
+        env:
+          # Optional repo secret: your Gofile account token (files go to your account,
+          # link is not printed in the public log). Without it: guest upload + link printed.
+          GOFILE_TOKEN: ${{ secrets.GOFILE_TOKEN }}
+        run: python3 split_encode.py gofile
+
       - name: Upload as artifact
-        if: inputs.output == 'artifact'
+        # Also used as a fallback if the Gofile upload fails, so the encode isn't lost
+        if: inputs.output == 'artifact' || (failure() && inputs.output == 'gofile')
         uses: actions/upload-artifact@v4
         with:
           name: ${{ needs.prepare.outputs.name }}
